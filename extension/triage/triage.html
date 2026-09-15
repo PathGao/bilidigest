@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BiliDigest · 收藏夹分拣台</title>
+    <link rel="stylesheet" href="./triage.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <strong class="brand">BiliDigest</strong>
+        <select id="folderSelect" aria-label="选择收藏夹"></select>
+        <button id="refreshBtn" type="button" aria-label="从 B 站刷新收藏夹">刷新</button>
+        <span id="progress" class="progress"></span>
+        <span id="queueStatus" class="queue-status" aria-live="polite"></span>
+        <span class="spacer"></span>
+        <button id="stage1Btn" type="button" class="primary" aria-label="标题粗分"></button>
+        <button id="groupBtn" type="button" aria-label="字幕细看一组"></button>
+        <button id="settingsBtn" type="button" aria-label="设置">设置</button>
+        <button id="helpBtn" type="button" aria-label="快捷键帮助">?</button>
+      </header>
+      <p class="hint">AI 处理只在本页打开时运行，关闭页面即暂停。</p>
+
+      <div id="banner" class="banner" hidden>
+        <span id="bannerText"></span>
+        <button id="bannerBtn" type="button"></button>
+      </div>
+
+      <div id="syncNotice" class="notice" hidden>
+        <span id="syncText"></span>
+        <button id="syncViewBtn" type="button" class="link" aria-label="查看同步详情">查看</button>
+        <span class="spacer"></span>
+        <button id="syncCloseBtn" type="button" class="icon" aria-label="关闭同步提示">×</button>
+        <div id="syncDetail" class="sync-detail" hidden></div>
+      </div>
+
+      <div class="main">
+        <section class="listpane">
+          <nav id="tabs" class="tabs" role="tablist" aria-label="按判断筛选"></nav>
+          <div class="tagbar">
+            <span class="tagbar-label">标签</span>
+            <span id="tagFilter" class="tagfilter"></span>
+            <button id="manageTagsBtn" type="button" class="link" aria-label="管理标签">管理标签</button>
+          </div>
+          <div id="listHeader" class="list-header" hidden></div>
+          <div id="list" class="list" aria-label="视频列表"></div>
+        </section>
+
+        <aside id="basket" class="basket">
+          <div class="basket-head">
+            <button id="basketToggle" type="button" class="basket-toggle" aria-expanded="true" aria-label="展开或收起摘录篮">
+              摘录篮 <span id="basketCount">0</span>
+            </button>
+          </div>
+          <div class="basket-body">
+            <div id="basketList" class="basket-list"></div>
+            <div class="basket-foot">
+              <button id="copyMdBtn" type="button" aria-label="复制 Markdown">复制 Markdown</button>
+              <button id="exportBtn" type="button" class="primary" aria-label="写入 Obsidian">写入 Obsidian</button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <dialog id="settingsDialog" aria-label="分拣设置">
+      <form method="dialog">
+        <h2>分拣设置</h2>
+        <label for="criteriaInput">判断标准</label>
+        <textarea id="criteriaInput" rows="6"></textarea>
+        <label for="intervalInput">间隔秒数</label>
+        <input id="intervalInput" type="number" min="0" step="1" />
+        <label for="batchSizeInput">标题粗分每批数量</label>
+        <input id="batchSizeInput" type="number" min="1" max="100" step="1" />
+        <label for="exportFolderInput">导出目录</label>
+        <input id="exportFolderInput" type="text" />
+        <h3 id="aiDebugTitle">AI 调试</h3>
+        <label class="toggle"><input id="thinkingInput" type="checkbox" /> 开启思考</label>
+        <p class="dialog-hint">关：快、省（30 个标题约 3 秒）。开：判断更细，但慢约 6 倍、费约 5 倍 token。目前只对 DeepSeek 生效。</p>
+        <label for="titleMaxInput">标题粗分输出上限（每批 token）</label>
+        <input id="titleMaxInput" type="number" min="0" max="32000" step="1" placeholder="自动" />
+        <p id="titleMaxHint" class="dialog-hint"></p>
+        <label for="analyzeMaxInput">字幕细看输出上限（每个 token）</label>
+        <input id="analyzeMaxInput" type="number" min="0" max="32000" step="1" placeholder="自动" />
+        <p id="analyzeMaxHint" class="dialog-hint"></p>
+        <p id="settingsError" class="form-error" role="alert" hidden></p>
+        <h3>数据导出</h3>
+        <div class="export-row">
+          <button id="backupBtn" type="button" aria-label="导出完整备份 JSON">导出完整备份 (JSON)</button>
+          <button id="csvBtn" type="button" aria-label="导出当前收藏夹表格 CSV">导出表格 (CSV)</button>
+        </div>
+        <div class="dialog-actions">
+          <button id="openOptionsBtn" type="button" class="link" aria-label="打开 AI 与 Obsidian 配置">AI / Obsidian 配置</button>
+          <span class="spacer"></span>
+          <button value="cancel" type="submit" aria-label="取消">取消</button>
+          <button value="save" type="submit" class="primary" aria-label="保存设置">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirmDialog" aria-label="确认">
+      <form method="dialog">
+        <h2 id="confirmTitle"></h2>
+        <div id="confirmBody" class="confirm-body"></div>
+        <div class="dialog-actions">
+          <span class="spacer"></span>
+          <button value="cancel" type="submit" aria-label="取消">取消</button>
+          <button id="confirmOk" value="ok" type="submit" class="primary"></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="pickerDialog" aria-label="打标签">
+      <form method="dialog">
+        <h2 id="pickerTitle">打标签</h2>
+        <input id="pickerInput" type="text" placeholder="输入筛选，或输入新名称后回车新建" aria-label="筛选或新建标签" autocomplete="off" />
+        <ul id="pickerList" class="picker-list" role="listbox" aria-label="标签"></ul>
+        <p class="dialog-hint">↑↓ 选择 · Enter 勾选或新建 · Esc 关闭</p>
+      </form>
+    </dialog>
+
+    <dialog id="tagsDialog" aria-label="管理标签">
+      <form method="dialog">
+        <h2>管理标签</h2>
+        <div id="tagsRows" class="tag-rows"></div>
+        <div class="tag-add">
+          <input id="newTagInput" type="text" placeholder="新标签名称" aria-label="新标签名称" />
+          <button id="addTagBtn" type="button" aria-label="添加标签">添加</button>
+        </div>
+        <div class="dialog-actions"><span class="spacer"></span><button type="submit" class="primary">完成</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="helpDialog" aria-label="快捷键帮助">
+      <form method="dialog">
+        <h2>快捷键</h2>
+        <dl class="keys">
+          <dt>J / ↓</dt><dd>下一个</dd>
+          <dt>K / ↑</dt><dd>上一个</dd>
+          <dt>D</dt><dd>取消收藏</dd>
+          <dt>S</dt><dd>保留</dd>
+          <dt>T</dt><dd>打标签</dd>
+          <dt>A</dt><dd>采纳 AI 建议标签</dd>
+          <dt>E</dt><dd>加入 / 移出摘录篮</dd>
+          <dt>X</dt><dd>选中 / 取消选中（用于细看）</dd>
+          <dt>O / Enter</dt><dd>打开视频</dd>
+          <dt>U</dt><dd>撤销上一步</dd>
+          <dt>?</dt><dd>显示本帮助</dd>
+        </dl>
+        <div class="dialog-actions"><span class="spacer"></span><button type="submit" class="primary">知道了</button></div>
+      </form>
+    </dialog>
+
+    <script src="./dev/mock-chrome.js"></script>
+    <script src="./triage.js"></script>
+  </body>
+</html>

@@ -142,6 +142,11 @@ function bindEvents() {
     await sendToRuntime({ type: "open-options" });
   });
 
+  document.getElementById("triageBtn").addEventListener("click", async () => {
+    await chrome.tabs.create({ url: chrome.runtime.getURL("triage/triage.html") });
+    window.close();
+  });
+
   el.aiBtn?.addEventListener("click", async () => {
     try {
       if (globalThis.browser?.sidebarAction?.open) {

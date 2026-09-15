@@ -211,6 +211,17 @@ body {
   cursor: pointer;
 }
 
+.triage-entry {
+  border: 1px solid var(--action-accent);
+  background: #f3efff;
+  border-radius: 9px;
+  padding: 7px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--action-accent);
+  cursor: pointer;
+}
+
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;

@@ -1781,3 +1781,5 @@ async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
   } catch {}
   return { ok: false, error: `HTTP ${response.status}${detail ? `: ${detail}` : ""}` };
 }
+
+importScripts("triage/triage-bg.js");
