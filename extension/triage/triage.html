@@ -17,6 +17,7 @@
         <span class="spacer"></span>
         <button id="stage1Btn" type="button" class="primary" aria-label="标题粗分"></button>
         <button id="groupBtn" type="button" aria-label="字幕细看一组"></button>
+        <button id="aiBtn" type="button" aria-label="AI 指令 (I)">AI 指令</button>
         <button id="settingsBtn" type="button" aria-label="设置">设置</button>
         <button id="helpBtn" type="button" aria-label="快捷键帮助">?</button>
       </header>
@@ -130,7 +131,67 @@
           <input id="newTagInput" type="text" placeholder="新标签名称" aria-label="新标签名称" />
           <button id="addTagBtn" type="button" aria-label="添加标签">添加</button>
         </div>
+        <h3>标签预设</h3>
+        <div class="tag-add">
+          <input id="presetNameInput" type="text" placeholder="预设名称" aria-label="预设名称" />
+          <button id="savePresetBtn" type="button" aria-label="保存当前标签为预设">保存当前标签为预设</button>
+        </div>
+        <div id="presetRows" class="tag-rows"></div>
         <div class="dialog-actions"><span class="spacer"></span><button type="submit" class="primary">完成</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="aiDialog" class="wide" aria-label="AI 指令">
+      <form method="dialog">
+        <section id="aiForm" class="ai-section">
+          <h2>AI 指令</h2>
+          <p class="dialog-hint">AI 只提出建议。你检查并点「应用选中」后才会改动标签和判断。</p>
+          <div class="ai-grid">
+            <label for="aiScope">作用范围</label>
+            <select id="aiScope">
+              <option value="filter">当前筛选结果</option>
+              <option value="selected">已选中 (X)</option>
+              <option value="group">本轮细看组</option>
+            </select>
+            <label for="aiPreset">预设</label>
+            <select id="aiPreset"></select>
+          </div>
+          <p id="aiScopeCount" class="dialog-hint"></p>
+          <label for="aiInstruction">指令</label>
+          <textarea id="aiInstruction" rows="3" placeholder="例如：把这些按技术深度分成 入门/进阶/硬核 三个标签"></textarea>
+          <div id="aiHistory" class="ai-history"></div>
+          <label>发送给 AI 的标签（高亮 = 来自预设）</label>
+          <div id="aiTagsPreview" class="chips"></div>
+          <label class="toggle"><input id="aiAllowNew" type="checkbox" checked /> 允许 AI 新建标签，最多
+            <input id="aiMaxNew" type="number" min="1" max="50" value="5" aria-label="最多新建标签数" /> 个</label>
+          <label class="toggle"><input id="aiAllowVerdict" type="checkbox" /> 允许 AI 修改删/留判断</label>
+          <p id="aiProgress" class="dialog-hint" aria-live="polite"></p>
+          <div class="dialog-actions">
+            <span class="spacer"></span>
+            <button id="aiCloseBtn" type="button" aria-label="关闭">关闭</button>
+            <button id="aiStopBtn" type="button" class="danger" aria-label="停止" hidden>停止</button>
+            <button id="aiRunBtn" type="button" class="primary" aria-label="运行 AI 指令">运行</button>
+          </div>
+        </section>
+        <section id="aiReview" class="ai-section" hidden>
+          <h2>检查 AI 的建议</h2>
+          <p id="aiReviewSummary" class="dialog-hint"></p>
+          <div id="aiNotes"></div>
+          <h3>新标签</h3>
+          <div id="aiNewTags" class="tag-rows"></div>
+          <div class="ai-review-head">
+            <h3>视频改动</h3>
+            <span class="spacer"></span>
+            <button id="aiAllBtn" type="button" class="link" aria-label="全选">全选</button>
+            <button id="aiNoneBtn" type="button" class="link" aria-label="全不选">全不选</button>
+          </div>
+          <div id="aiRows" class="ai-rows"></div>
+          <div class="dialog-actions">
+            <span class="spacer"></span>
+            <button id="aiDiscardBtn" type="button" aria-label="放弃这些建议">放弃</button>
+            <button id="aiApplyBtn" type="button" class="primary">应用选中</button>
+          </div>
+        </section>
       </form>
     </dialog>
 
@@ -147,6 +208,7 @@
           <dt>E</dt><dd>加入 / 移出摘录篮</dd>
           <dt>X</dt><dd>选中 / 取消选中（用于细看）</dd>
           <dt>O / Enter</dt><dd>打开视频</dd>
+          <dt>I</dt><dd>AI 指令</dd>
           <dt>U</dt><dd>撤销上一步</dd>
           <dt>?</dt><dd>显示本帮助</dd>
         </dl>

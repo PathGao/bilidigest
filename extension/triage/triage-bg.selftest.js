@@ -107,4 +107,75 @@ assert.strictEqual(t.triageMaxTokens("analyze", 1, on), 8000);
 assert.strictEqual(t.triageMaxTokens("title", 30, { ...on, triageTitleMaxTokens: 5000 }), 5000);
 assert.strictEqual(t.triageMaxTokens("analyze", 1, { ...off, triageAnalyzeMaxTokens: 2500.7 }), 2500);
 
+assert.strictEqual(t.triageMaxTokens("command", 30, off), 2800);
+assert.strictEqual(t.triageMaxTokens("command", 30, on), 9400);
+assert.strictEqual(t.triageMaxTokens("command", 30, { ...off, triageTitleMaxTokens: 5000 }), 5000);
+
+const plain = (x) => JSON.parse(JSON.stringify(x));
+
+// tags with descriptions: names, rendering, coercion by name
+assert.deepStrictEqual(plain(t.triageTagNames(["AI", { name: " 编程 ", description: "写代码" }, { name: "" }, null])), ["AI", "编程"]);
+assert.strictEqual(t.triageTagListText([]), "可选标签：（无）");
+const rendered = t.triageTagListText([{ name: "AI", description: "讲大模型的" }, { name: "编程", description: "" }, "理财"]);
+assert.ok(rendered.endsWith("\n- AI：讲大模型的\n- 编程\n- 理财"), rendered);
+assert.ok(rendered.includes("说明是用户规定"));
+assert.deepStrictEqual(plain(t.triageCoerceTags(["AI", "编程"], [{ name: "AI", description: "x" }], 3)), ["AI"]);
+assert.strictEqual(t.triageCleanTagName(" 一二三四五六七八九十甲乙丙 "), "一二三四五六七八九十甲乙");
+assert.strictEqual(t.triageCleanTagName("a，b、c,d"), "abcd");
+
+// command line + messages
+assert.strictEqual(
+  t.triageCommandLine({ title: "T|x", upper: "U", duration: 61, currentTags: ["AI", "编程"], oneLiner: "一句", points: ["p1", "p2", "p3"] }, 2),
+  "2|T x|U|1:01|AI、编程|一句|p1；p2；p3"
+);
+assert.strictEqual(t.triageCommandLine({ title: "T" }, 1), "1|T|||||");
+const cmdMsgs = t.triageBuildCommandMessages({
+  instruction: "把讲 AI 的都标上",
+  tags: [{ name: "AI", description: "讲大模型" }],
+  items: [{ bvid: "BV1", title: "T" }],
+  allowNewTags: false,
+  maxNewTags: 5,
+  allowVerdict: false
+});
+assert.ok(cmdMsgs[0].content.includes("new_tags 必须是 []"));
+assert.ok(cmdMsgs[0].content.includes("- AI：讲大模型"));
+assert.ok(!cmdMsgs[0].content.includes('"verdict"'));
+assert.ok(cmdMsgs[1].content.includes("<<<指令>>>\n把讲 AI 的都标上\n<<<指令结束>>>"));
+assert.ok(cmdMsgs[1].content.endsWith("\n1|T|||||"));
+
+// command parse
+const cmdItems = [
+  { bvid: "BV1", currentTags: ["AI", "旧"] },
+  { bvid: "BV2", currentTags: [] },
+  { bvid: "BV3" },
+  { bvid: "BV4", currentTags: ["编程"] }
+];
+const cmdTags = [{ name: "AI", description: "" }, "编程", "旧"];
+const cmdOut =
+  '好的，提案如下：\n```json\n{"new_tags":[{"name":" 数学 ","description":"讲数学的"},{"name":"AI"},{"name":"物理,力学","description":"d"},{"name":"数学"},{"name":"化学"}],' +
+  '"items":[{"i":2,"add":["数学","不存在","编程","编程"],"remove":["AI"],"verdict":"KEEP","reason":"讲 {数学}"},' +
+  '{"i":1,"add":["AI","物理力学"],"remove":["旧","不在"],"verdict":"drop","reason":"r1"},' +
+  '{"i":3,"add":["化学"],"remove":[]},{"i":4,"add":[],"remove":[],"reason":"无"},{"i":9,"add":["AI"]},{"i":2,"add":["旧"]}],"note":"已打标签"}\n``` 以上';
+assert.deepStrictEqual(plain(t.triageParseCommand(cmdOut, cmdItems, cmdTags, { allowNewTags: true, maxNewTags: 2, allowVerdict: true })), {
+  newTags: [{ name: "数学", description: "讲数学的" }, { name: "物理力学", description: "d" }],
+  assignments: {
+    BV2: { add: ["数学", "编程"], remove: [], verdict: "keep", reason: "讲 {数学}" },
+    BV1: { add: ["物理力学"], remove: ["旧"], verdict: "drop", reason: "r1" }
+  },
+  note: "已打标签"
+});
+const noNew = {
+  newTags: [],
+  assignments: {
+    BV2: { add: ["编程"], remove: [], reason: "讲 {数学}" },
+    BV1: { add: [], remove: ["旧"], reason: "r1" }
+  },
+  note: "已打标签"
+};
+assert.deepStrictEqual(plain(t.triageParseCommand(cmdOut, cmdItems, cmdTags, { allowNewTags: false, maxNewTags: 5, allowVerdict: false })), noNew);
+assert.deepStrictEqual(plain(t.triageParseCommand(cmdOut, cmdItems, cmdTags, { allowNewTags: true, maxNewTags: 0, allowVerdict: false })), noNew);
+assert.deepStrictEqual(plain(t.triageParseCommand('{"items":[]}', cmdItems, cmdTags, {})), { newTags: [], assignments: {}, note: "" });
+assert.throws(() => t.triageParseCommand("抱歉，没法处理", cmdItems, cmdTags, {}), /不是 JSON/);
+assert.throws(() => t.triageParseCommand('{"new_tags":[', cmdItems, cmdTags, {}), /不完整/);
+
 console.log("triage-bg selftest: all passed");

@@ -105,9 +105,21 @@ function triageVerdict(v) {
   return ["keep", "drop", "unsure"].includes(s) ? s : "unsure";
 }
 
+// tags 可以是 ["名称"] 或 [{ name, description }]
+function triageTagNames(tags) {
+  return (Array.isArray(tags) ? tags : [])
+    .map((t) => String((t && typeof t === "object" ? t.name : t) ?? "").trim())
+    .filter(Boolean);
+}
+
+// 新标签名：去掉逗号顿号和首尾空白，≤12 字
+function triageCleanTagName(name) {
+  return String(name ?? "").replace(/[,，、]/g, "").trim().slice(0, 12);
+}
+
 // 只保留列表内的标签，外加至多一个 "新:" 前缀的新标签，总数 ≤ max
 function triageCoerceTags(raw, tags, max) {
-  const allowed = new Set((Array.isArray(tags) ? tags : []).map((t) => String(t).trim()));
+  const allowed = new Set(triageTagNames(tags));
   const out = [];
   let hasNew = false;
   for (const item of Array.isArray(raw) ? raw : []) {
@@ -172,6 +184,52 @@ function triageTitleLine(item, n) {
   return `${n}|${clean(item.title)}|${clean(item.upper)}|${dur}|${clean(item.intro).slice(0, 60)}`;
 }
 
+// 序号|标题|UP|时长|现有标签|一句话|要点1；要点2；要点3（没有的字段留空）
+function triageCommandLine(item, n) {
+  const clean = (s) => String(s ?? "").replace(/[|\r\n]+/g, " ").trim();
+  const list = (a) => (Array.isArray(a) ? a.map(clean).filter(Boolean) : []);
+  const d = Number(item.duration) || 0;
+  const dur = d ? `${Math.floor(d / 60)}:${String(d % 60).padStart(2, "0")}` : "";
+  return [n, clean(item.title), clean(item.upper), dur, list(item.currentTags).join("、"), clean(item.oneLiner), list(item.points).join("；")].join("|");
+}
+
+// AI 指令提案：add 只留已有标签或本次新建的标签，remove 只留视频现有标签，按开关裁掉新标签和 verdict；无改动的视频不返回
+function triageParseCommand(content, items, tags, { allowNewTags = false, maxNewTags = 5, allowVerdict = false } = {}) {
+  const obj = triageExtractJson(content, "{");
+  const existing = new Set(triageTagNames(tags));
+  const newTags = [];
+  if (allowNewTags) {
+    for (const t of Array.isArray(obj.new_tags) ? obj.new_tags : []) {
+      if (newTags.length >= maxNewTags) break;
+      const name = triageCleanTagName(t && typeof t === "object" ? t.name : t);
+      if (!name || existing.has(name) || newTags.some((x) => x.name === name)) continue;
+      newTags.push({ name, description: String(t?.description ?? "").trim() });
+    }
+  }
+  const valid = new Set([...existing, ...newTags.map((t) => t.name)]);
+  const byIndex = new Map();
+  for (const r of Array.isArray(obj.items) ? obj.items : []) {
+    const i = Number(r?.i);
+    if (Number.isInteger(i) && !byIndex.has(i)) byIndex.set(i, r);
+  }
+  const assignments = {};
+  items.forEach((item, idx) => {
+    const r = byIndex.get(idx + 1);
+    if (!r || !item?.bvid) return;
+    const current = new Set(triageTagNames(item.currentTags));
+    const pick = (arr, ok) => [...new Set((Array.isArray(arr) ? arr : []).map((x) => triageCleanTagName(x)))].filter((x) => x && ok(x));
+    const a = {
+      add: pick(r.add, (x) => valid.has(x) && !current.has(x)),
+      remove: pick(r.remove, (x) => current.has(x)),
+      reason: String(r.reason ?? "").trim()
+    };
+    const v = String(r.verdict || "").trim().toLowerCase();
+    if (allowVerdict && ["keep", "drop", "unsure"].includes(v)) a.verdict = v;
+    if (a.add.length || a.remove.length || a.verdict) assignments[item.bvid] = a;
+  });
+  return { newTags, assignments, note: String(obj.note ?? "").trim() };
+}
+
 function triageForm(obj) {
   return new URLSearchParams(Object.entries(obj).map(([k, v]) => [k, String(v)])).toString();
 }
@@ -202,8 +260,18 @@ function triageWithCriteria(system, criteria) {
 }
 
 function triageTagListText(tags) {
-  const list = (Array.isArray(tags) ? tags : []).map((t) => String(t).trim()).filter(Boolean);
-  return `可选标签：${list.length ? list.join("、") : "（无）"}`;
+  const list = (Array.isArray(tags) ? tags : [])
+    .map((t) =>
+      t && typeof t === "object"
+        ? { name: String(t.name ?? "").trim(), description: String(t.description ?? "").trim() }
+        : { name: String(t ?? "").trim(), description: "" }
+    )
+    .filter((t) => t.name);
+  if (!list.length) return "可选标签：（无）";
+  return [
+    "可选标签（每行“名称：说明”，说明是用户规定的该标签什么时候用）：",
+    ...list.map((t) => (t.description ? `- ${t.name}：${t.description}` : `- ${t.name}`))
+  ].join("\n");
 }
 
 function triageBuildMessages(meta, source, text, criteria, tags) {
@@ -216,6 +284,45 @@ function triageBuildMessages(meta, source, text, criteria, tags) {
     `标签：${meta.tags.join("、") || "无"}`,
     `简介：${meta.desc || "无"}`,
     source === "subtitle" ? `\n字幕：\n${text}` : `\n（无可用字幕）\n热门评论：\n${text || "无"}`
+  ].join("\n");
+  return [
+    { role: "system", content: system },
+    { role: "user", content: user }
+  ];
+}
+
+function triageBuildCommandMessages({ instruction, tags, items, allowNewTags, maxNewTags, allowVerdict }) {
+  const example = allowVerdict
+    ? '{"new_tags": [{"name": "标签名", "description": "一句话说明"}], "items": [{"i": 序号, "add": ["标签"], "remove": ["标签"], "verdict": "keep|drop|unsure", "reason": "≤20字"}], "note": "≤60字"}'
+    : '{"new_tags": [{"name": "标签名", "description": "一句话说明"}], "items": [{"i": 序号, "add": ["标签"], "remove": ["标签"], "reason": "≤20字"}], "note": "≤60字"}';
+  const system = [
+    "你是 B站收藏整理助手，按用户指令给视频打标签、做分类。",
+    "用户指令写在 <<<指令>>> 和 <<<指令结束>>> 之间，它就是本次任务的要求。",
+    "规则：",
+    "- add 只能用已有标签名，或本次 new_tags 里列出的新标签名。",
+    allowNewTags
+      ? `- 可以新建标签，至多 ${maxNewTags} 个，名称 ≤12字、不含逗号，每个配一句话说明什么时候用；已有标签能用就先用，不要重复造。`
+      : "- 不允许新建标签，new_tags 必须是 []。",
+    "- remove 只能填该视频“现有标签”里的名称。",
+    allowVerdict
+      ? "- 指令涉及去留时给 verdict：keep = 值得留，drop = 可以删，unsure = 拿不准；不涉及就不写。"
+      : "- 不要输出 verdict 字段。",
+    "- reason ≤20字。",
+    "- 指令不适用的视频不要放进 items。",
+    "- note ≤60字，总结做了什么，或者为什么没有合适的。",
+    "- 有“一句话”和“要点”的视频以它们为主要依据，它们比标题可靠得多。",
+    "只输出严格 JSON，不要任何其他文字、不要代码块：",
+    example,
+    "",
+    triageTagListText(tags)
+  ].join("\n");
+  const user = [
+    "<<<指令>>>",
+    String(instruction ?? "").trim(),
+    "<<<指令结束>>>",
+    "",
+    "视频列表，每行格式：序号|标题|UP主|时长|现有标签|一句话|要点1；要点2；要点3（没有的字段留空）：",
+    ...items.map((it, idx) => triageCommandLine(it, idx + 1))
   ].join("\n");
   return [
     { role: "system", content: system },
@@ -291,9 +398,11 @@ const TRIAGE_SETTINGS_DEFAULTS = {
 
 // 输出上限：用户填了正数就用用户的，否则按是否思考自动（思考 token 计入 max_tokens）
 function triageMaxTokens(kind, itemCount, { triageThinking, triageTitleMaxTokens, triageAnalyzeMaxTokens }) {
-  const custom = Number(kind === "title" ? triageTitleMaxTokens : triageAnalyzeMaxTokens);
+  // command 与 title 共用 triageTitleMaxTokens
+  const custom = Number(kind === "analyze" ? triageAnalyzeMaxTokens : triageTitleMaxTokens);
   if (custom > 0) return Math.floor(custom);
   if (kind === "title") return triageThinking ? 150 * itemCount + 4000 : 60 * itemCount + 200;
+  if (kind === "command") return triageThinking ? 180 * itemCount + 4000 : 80 * itemCount + 400;
   return triageThinking ? 8000 : 1000;
 }
 
@@ -416,6 +525,24 @@ async function triageClassifyTitles({ items, tags }) {
   return { results };
 }
 
+// 协作打标签：只返回提案，不缓存
+async function triageAiCommand({ instruction, tags, items, allowNewTags, maxNewTags, allowVerdict }) {
+  const text = String(instruction ?? "").trim();
+  if (!text) throw triageError("缺少指令");
+  const list = (Array.isArray(items) ? items : []).filter((it) => it && it.bvid);
+  if (!list.length) throw triageError("缺少 items");
+  const n = Number(maxNewTags ?? 5);
+  const opts = { allowNewTags: allowNewTags === true, maxNewTags: n >= 0 ? Math.floor(n) : 5, allowVerdict: allowVerdict === true };
+  const tagList = Array.isArray(tags) ? tags : [];
+  const ai = await triageAiSettings();
+  const { content } = await triageChat(
+    triageBuildCommandMessages({ instruction: text, tags: tagList, items: list, ...opts }),
+    triageMaxTokens("command", list.length, ai),
+    ai.triageThinking
+  );
+  return triageParseCommand(content, list, tagList, opts);
+}
+
 const TRIAGE_HANDLERS = {
   "triage-folders": () => triageCreatedFolders(),
 
@@ -454,6 +581,8 @@ const TRIAGE_HANDLERS = {
   "triage-analyze": (msg) => triageAnalyze(msg),
 
   "triage-classify-titles": (msg) => triageClassifyTitles(msg),
+
+  "triage-ai-command": (msg) => triageAiCommand(msg),
 
   "triage-title-get": async ({ bvids }) => {
     const list = Array.isArray(bvids) ? bvids : [];

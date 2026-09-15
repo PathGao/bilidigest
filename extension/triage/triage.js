@@ -22,8 +22,37 @@ const K = {
   videoTags: "triage_video_tags",
   basket: "triage_basket",
   decisions: (id) => `triage_decisions_${id}`,
-  snapshot: (id) => `triage_snapshot_${id}`
+  snapshot: (id) => `triage_snapshot_${id}`,
+  presets: "triage_tag_presets",
+  aiHistory: "triage_ai_command_history",
+  override: (bvid) => `triage_verdict_override_${bvid}`
 };
+const OVERRIDE_PREFIX = "triage_verdict_override_";
+const BUILTIN_PRESETS = [
+  {
+    id: "preset-topic",
+    name: "学习主题",
+    instruction: "按视频主题打 1 个最贴切的标签",
+    tags: [
+      { name: "AI工程", description: "大模型、Agent、RAG、AI 编程等技术实践" },
+      { name: "产品设计", description: "产品思路、交互设计、用户研究" },
+      { name: "创业商业", description: "创业经验、商业模式、行业分析" },
+      { name: "个人成长", description: "学习方法、效率、职业发展" },
+      { name: "娱乐放松", description: "搞笑、闲聊、纯娱乐内容" }
+    ]
+  },
+  {
+    id: "preset-priority",
+    name: "处理优先级",
+    instruction: "按对我的实用价值和紧迫度打 1 个标签",
+    tags: [
+      { name: "马上看", description: "和我当前工作直接相关，这周就要用" },
+      { name: "有空看", description: "有价值但不急" },
+      { name: "存档参考", description: "以后查资料时有用，不必现在看" },
+      { name: "可以删", description: "过时、重复或价值低" }
+    ]
+  }
+];
 
 // ---------- state ----------
 const S = {
@@ -60,7 +89,11 @@ const S = {
   status: "",
   undo: [],
   lastSyncAt: 0,
-  syncing: false
+  syncing: false,
+  overrides: {}, // bvid -> { verdict, reason, by, at }
+  presets: [],
+  aiHistory: [],
+  ai: { running: false, stop: false, proposal: null }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -73,7 +106,10 @@ const el = {};
   "batchSizeInput", "exportFolderInput", "openOptionsBtn", "aiDebugTitle", "thinkingInput", "titleMaxInput",
   "titleMaxHint", "analyzeMaxInput", "analyzeMaxHint", "settingsError", "backupBtn", "csvBtn", "confirmDialog",
   "confirmTitle", "confirmBody", "confirmOk", "pickerDialog", "pickerTitle", "pickerInput", "pickerList",
-  "tagsDialog", "tagsRows", "newTagInput", "addTagBtn", "helpDialog"
+  "tagsDialog", "tagsRows", "newTagInput", "addTagBtn", "helpDialog", "presetNameInput", "savePresetBtn",
+  "presetRows", "aiBtn", "aiDialog", "aiForm", "aiScope", "aiPreset", "aiScopeCount", "aiInstruction", "aiHistory",
+  "aiTagsPreview", "aiAllowNew", "aiMaxNew", "aiAllowVerdict", "aiProgress", "aiCloseBtn", "aiStopBtn", "aiRunBtn",
+  "aiReview", "aiReviewSummary", "aiNotes", "aiNewTags", "aiAllBtn", "aiNoneBtn", "aiRows", "aiDiscardBtn", "aiApplyBtn"
 ].forEach((id) => (el[id] = $(id)));
 
 // ---------- utils ----------
@@ -185,6 +221,8 @@ function verdictOf(it) {
   const a = S.analyses[it.bvid];
   const failed = a?.status === "error" ? a.error || "分析失败" : "";
   if (it.invalid) return { verdict: "drop", reason: "视频已失效", stage: 0, failed: "" };
+  const o = S.overrides[it.bvid];
+  if (o) return { verdict: o.verdict, reason: o.reason, stage: 3, failed: "" };
   if (a?.status === "done") return { verdict: a.verdict, reason: a.reason, stage: 2, failed: "" };
   const t = S.titleRes[it.bvid];
   if (t) return { verdict: t.verdict, reason: t.reason, stage: 1, low: t.confidence === "low", failed };
@@ -238,6 +276,13 @@ async function init() {
   S.tags = tags;
   S.videoTags = videoTags;
   S.basket = basket;
+  const all = (await chrome.storage.local.get(null)) || {};
+  S.presets = all[K.presets] || structuredClone(BUILTIN_PRESETS);
+  if (!all[K.presets]) storeSet(K.presets, S.presets);
+  S.aiHistory = all[K.aiHistory] || [];
+  for (const [k, v] of Object.entries(all)) {
+    if (k.startsWith(OVERRIDE_PREFIX)) S.overrides[k.slice(OVERRIDE_PREFIX.length)] = v;
+  }
   if (settingsResp.ok) Object.assign(S.settings, settingsResp.data);
   renderBasket();
   await loadFolders();
@@ -423,6 +468,7 @@ function renderTop() {
   el.groupBtn.textContent = label;
   el.groupBtn.setAttribute("aria-label", label);
   el.groupBtn.disabled = S.stage1.running || (!groupRunning && label.endsWith("(0)"));
+  el.aiBtn.textContent = S.ai.running ? "AI 指令 · 运行中" : S.ai.proposal ? "AI 指令 · 待确认" : "AI 指令";
   renderStatus();
 }
 
@@ -534,7 +580,7 @@ function cardHtml(it, expanded) {
   let verdict;
   if (S.analyzing.has(b)) verdict = `<span class="badge running">分析中…</span>`;
   else verdict = `<span class="badge ${v.verdict}${v.low ? " low" : ""}">${VERDICT_LABEL[v.verdict]}${v.low ? " · 低置信" : ""}</span>`;
-  const stageMark = v.stage === 1 ? `<span class="stage">标题判断</span>` : v.stage === 2 ? `<span class="stage">字幕判断</span>` : "";
+  const stageMark = v.stage > 0 ? `<span class="stage">${["", "标题判断", "字幕判断", "AI 指令"][v.stage]}</span>` : "";
   const failed = v.failed
     ? `<span class="fail-text">分析失败：${esc(v.failed)}</span><button type="button" data-act="retry" aria-label="重试分析">重试</button>`
     : "";
@@ -676,6 +722,22 @@ async function undo() {
     saveVideoTags();
     toast("已撤销标签修改");
     S.focused = entry.bvid;
+  } else if (entry.kind === "aiApply") {
+    S.tags = entry.prevTags;
+    S.videoTags = entry.prevVideoTags;
+    for (const [b, o] of Object.entries(entry.prevOverrides)) {
+      if (o) {
+        S.overrides[b] = o;
+        storeSet(K.override(b), o);
+      } else {
+        delete S.overrides[b];
+        chrome.storage.local.remove(K.override(b));
+      }
+    }
+    for (const id of [...S.tagFilter]) if (!tagById(id)) S.tagFilter.delete(id);
+    saveTags();
+    saveVideoTags();
+    toast(`已撤销 AI 指令对 ${entry.count} 个视频的改动`);
   }
   render();
   setFocus(S.focused);
@@ -725,11 +787,25 @@ function batchKeep() {
 // ---------- tags ----------
 const saveTags = () => storeSet(K.tags, S.tags);
 
-function createTag(name) {
+const tagPayload = () => S.tags.map((t) => ({ name: t.name, description: t.description || "" }));
+
+// Returns the tag with this name, creating it if needed; fills an empty description.
+function createTag(name, description = "") {
   name = stripNew(name);
   const existing = S.tags.find((t) => t.name === name);
-  if (existing) return existing;
-  const tag = { id: `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name, color: TAG_COLORS[S.tags.length % TAG_COLORS.length] };
+  if (existing) {
+    if (!existing.description && description) {
+      existing.description = description;
+      saveTags();
+    }
+    return existing;
+  }
+  const tag = {
+    id: `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    name,
+    description,
+    color: TAG_COLORS[S.tags.length % TAG_COLORS.length]
+  };
   S.tags.push(tag);
   saveTags();
   return tag;
@@ -825,6 +901,7 @@ function closePicker() {
 }
 
 function renderTagManager() {
+  renderPresets();
   const counts = {};
   for (const ids of Object.values(S.videoTags)) for (const id of ids) counts[id] = (counts[id] || 0) + 1;
   el.tagsRows.innerHTML = S.tags.length
@@ -833,6 +910,7 @@ function renderTagManager() {
           (t) => `<div class="tag-row" data-id="${esc(t.id)}">
       <input type="color" value="${esc(t.color)}" data-field="color" aria-label="标签颜色 ${esc(t.name)}" />
       <input type="text" value="${esc(t.name)}" data-field="name" aria-label="标签名称" />
+      <input type="text" value="${esc(t.description)}" data-field="description" placeholder="说明：什么时候用这个标签（AI 会参考）" aria-label="标签说明 ${esc(t.name)}" />
       <span class="muted">${counts[t.id] || 0} 个视频</span>
       <button type="button" class="danger" data-field="delete" aria-label="删除标签 ${esc(t.name)}">删除</button>
     </div>`
@@ -853,7 +931,7 @@ async function deleteTag(id) {
     else delete S.videoTags[b];
   }
   S.tagFilter.delete(id);
-  S.undo = S.undo.filter((e) => e.kind !== "tags");
+  S.undo = S.undo.filter((e) => e.kind !== "tags" && e.kind !== "aiApply");
   saveTags();
   saveVideoTags();
   renderTagManager();
@@ -887,7 +965,7 @@ async function runStage1() {
     if (!batch.length) break;
     S.status = `标题粗分中 ${done}/${total}`;
     renderStatus();
-    const r = await send({ type: "triage-classify-titles", items: batch.map(aiItem), tags: S.tags.map((t) => t.name) });
+    const r = await send({ type: "triage-classify-titles", items: batch.map(aiItem), tags: tagPayload() });
     if (token !== S.folderToken) break;
     if (!r.ok) {
       if (r.code === "THROTTLED") {
@@ -937,7 +1015,7 @@ function startGroup(bvids) {
 async function analyzeOne(bvid, force = false) {
   S.analyzing.add(bvid);
   render();
-  const r = await send({ type: "triage-analyze", bvid, force, tags: S.tags.map((t) => t.name) });
+  const r = await send({ type: "triage-analyze", bvid, force, tags: tagPayload() });
   S.analyzing.delete(bvid);
   return r;
 }
@@ -1005,6 +1083,355 @@ function afterProcessedChange() {
     toast("本组已处理完，自动开始下一组");
     nextGroup();
   }
+}
+
+// ---------- tag presets ----------
+const savePresets = () => storeSet(K.presets, S.presets);
+
+function renderPresets() {
+  el.presetRows.innerHTML = S.presets.length
+    ? S.presets
+        .map(
+          (p) => `<div class="preset-row" data-id="${esc(p.id)}">
+      <div class="row">
+        <strong>${esc(p.name)}</strong>
+        <span class="muted">${esc(p.tags.map((t) => t.name).join("、"))}</span>
+        <span class="spacer"></span>
+        <button type="button" data-preset="apply" aria-label="应用预设 ${esc(p.name)}">应用</button>
+        <button type="button" class="danger" data-preset="delete" aria-label="删除预设 ${esc(p.name)}">删除</button>
+      </div>
+      <textarea data-preset="instruction" rows="2" placeholder="给 AI 的指令，例如：按视频主题打 1 个最贴切的标签" aria-label="预设指令 ${esc(p.name)}">${esc(p.instruction)}</textarea>
+    </div>`
+        )
+        .join("")
+    : `<p class="muted">还没有预设</p>`;
+}
+
+function saveCurrentAsPreset() {
+  if (!S.tags.length) {
+    toast("还没有标签，先添加标签再保存预设", true);
+    return;
+  }
+  const name = el.presetNameInput.value.trim() || `我的预设 ${S.presets.length + 1}`;
+  S.presets.push({ id: `p${Date.now().toString(36)}`, name, instruction: "", tags: tagPayload() });
+  el.presetNameInput.value = "";
+  savePresets();
+  renderPresets();
+}
+
+async function applyPreset(id) {
+  const p = S.presets.find((x) => x.id === id);
+  if (!p) return;
+  const list = p.tags
+    .map((t) => `<li>${esc(t.name)}${S.tags.some((x) => x.name === t.name) ? "（已有）" : ""}：${esc(t.description)}</li>`)
+    .join("");
+  const ok = await askConfirm(`应用预设「${p.name}」？`, `<p>把这些标签合并进现有标签。同名标签只补充空的说明。</p><ul>${list}</ul>`, "应用");
+  if (!ok) return;
+  for (const t of p.tags) createTag(t.name, t.description || "");
+  renderTagManager();
+  render();
+  toast(`已应用预设「${p.name}」`);
+}
+
+async function deletePreset(id) {
+  const p = S.presets.find((x) => x.id === id);
+  if (!p || !(await askConfirm(`删除预设「${p.name}」？`, "<p>只删除预设，不影响已有标签。</p>", "删除"))) return;
+  S.presets = S.presets.filter((x) => x.id !== id);
+  savePresets();
+  renderPresets();
+}
+
+// ---------- AI command ----------
+function aiScopeItems() {
+  const scope = el.aiScope.value;
+  if (scope === "selected") return [...S.selected].map((b) => S.itemMap.get(b)).filter(Boolean);
+  if (scope === "group") return (S.group?.bvids || []).map((b) => S.itemMap.get(b)).filter(Boolean);
+  return visibleItems();
+}
+
+const aiPresetTags = () => S.presets.find((p) => p.id === el.aiPreset.value)?.tags || [];
+
+// Existing tags plus the chosen preset's tags; preset descriptions fill empty ones.
+function aiTagsToSend() {
+  const out = tagPayload();
+  for (const pt of aiPresetTags()) {
+    const hit = out.find((t) => t.name === pt.name);
+    if (!hit) out.push({ name: pt.name, description: pt.description || "" });
+    else if (!hit.description) hit.description = pt.description || "";
+  }
+  return out;
+}
+
+function aiCommandItem(it) {
+  const out = aiItem(it);
+  const a = S.analyses[it.bvid];
+  if (a?.status === "done") {
+    out.oneLiner = a.oneLiner || "";
+    out.points = a.points || [];
+  }
+  const v = verdictOf(it);
+  if (v.verdict !== "none") out.verdict = v.verdict;
+  const names = tagIdsOf(it.bvid).map((id) => tagById(id).name);
+  if (names.length) out.currentTags = names;
+  return out;
+}
+
+function openAi() {
+  const current = el.aiPreset.value;
+  el.aiPreset.innerHTML =
+    `<option value="">不使用预设</option>` + S.presets.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  el.aiPreset.value = S.presets.some((p) => p.id === current) ? current : "";
+  if (S.ai.proposal && !S.ai.running) showAiReview();
+  else showAiForm();
+  el.aiDialog.showModal();
+}
+
+function showAiForm() {
+  el.aiForm.hidden = false;
+  el.aiReview.hidden = true;
+  renderAiForm();
+}
+
+function showAiReview() {
+  el.aiForm.hidden = true;
+  el.aiReview.hidden = false;
+  renderAiReview();
+}
+
+function renderAiForm() {
+  const counts = { filter: visibleItems().length, selected: S.selected.size, group: S.group?.bvids.length || 0 };
+  const labels = { filter: "当前筛选结果", selected: "已选中 (X)", group: "本轮细看组" };
+  for (const o of el.aiScope.options) {
+    o.textContent = `${labels[o.value]} · ${counts[o.value]} 个`;
+    o.disabled = !counts[o.value];
+  }
+  if (el.aiScope.selectedOptions[0]?.disabled) el.aiScope.value = "filter";
+  const n = aiScopeItems().length;
+  const size = Math.max(1, Number(S.settings.triageTitleBatchSize) || 30);
+  el.aiScopeCount.textContent = n ? `将发送 ${n} 个视频，分 ${Math.ceil(n / size)} 批` : "作用范围里没有视频";
+  const presetNames = new Set(aiPresetTags().map((t) => t.name));
+  const sent = aiTagsToSend();
+  el.aiTagsPreview.innerHTML = sent.length
+    ? sent
+        .map((t) => `<span class="chip${presetNames.has(t.name) ? " on" : ""}" title="${esc(t.description)}">${esc(t.name)}</span>`)
+        .join("")
+    : `<span class="muted">还没有标签，AI 可以新建</span>`;
+  el.aiHistory.innerHTML = S.aiHistory.length
+    ? `<span class="muted">最近：</span>` +
+      S.aiHistory
+        .map((h, i) => `<button type="button" class="chip" data-h="${i}" title="${esc(h)}" aria-label="使用指令 ${esc(h)}">${esc(h.length > 18 ? `${h.slice(0, 18)}…` : h)}</button>`)
+        .join("")
+    : "";
+  el.aiMaxNew.disabled = !el.aiAllowNew.checked;
+  el.aiRunBtn.disabled = S.ai.running;
+  el.aiStopBtn.hidden = !S.ai.running;
+}
+
+async function runAiCommand() {
+  if (S.ai.running) return;
+  const instruction = el.aiInstruction.value.trim();
+  const items = aiScopeItems();
+  if (!instruction) {
+    el.aiProgress.textContent = "请先写指令";
+    el.aiInstruction.focus();
+    return;
+  }
+  if (!items.length) {
+    el.aiProgress.textContent = "作用范围里没有视频";
+    return;
+  }
+  S.aiHistory = [instruction, ...S.aiHistory.filter((x) => x !== instruction)].slice(0, 5);
+  storeSet(K.aiHistory, S.aiHistory);
+  const opts = {
+    allowNewTags: el.aiAllowNew.checked,
+    maxNewTags: el.aiAllowNew.checked ? Math.max(0, Number(el.aiMaxNew.value) || 0) : 0,
+    allowVerdict: el.aiAllowVerdict.checked
+  };
+  const sentTags = aiTagsToSend();
+  const size = Math.max(1, Number(S.settings.triageTitleBatchSize) || 30);
+  const scopeSet = new Set(items.map((it) => it.bvid));
+  const total = Math.ceil(items.length / size);
+  const p = { newTags: [], rows: [], notes: [], errors: [] };
+  const token = S.folderToken;
+  const keepGoing = () => !S.ai.stop && token === S.folderToken;
+  S.ai.running = true;
+  S.ai.stop = false;
+  renderAiForm();
+  renderTop();
+  for (let i = 0; i < total && keepGoing(); i++) {
+    el.aiProgress.textContent = `正在处理第 ${i + 1} / ${total} 批…`;
+    const batch = items.slice(i * size, (i + 1) * size);
+    const r = await send({ type: "triage-ai-command", instruction, tags: sentTags, items: batch.map(aiCommandItem), ...opts });
+    if (!r.ok) {
+      p.errors.push(`第 ${i + 1} 批失败：${r.error}`);
+      if (/截断|配置 AI/.test(r.error || "")) handleAiError(r.error);
+    } else {
+      mergeAiBatch(p, r.data, opts, scopeSet, sentTags);
+    }
+    if (i + 1 < total) await sleepWhile(S.settings.triageIntervalSec * 1000, keepGoing);
+  }
+  S.ai.running = false;
+  el.aiProgress.textContent = "";
+  if (token !== S.folderToken) {
+    renderTop();
+    return;
+  }
+  if (S.ai.stop) p.errors.push("已手动停止，这里只有已完成批次的建议");
+  S.ai.proposal = p;
+  renderTop();
+  if (el.aiDialog.open) showAiReview();
+  else toast("AI 指令已完成，按 I 查看建议");
+}
+
+function mergeAiBatch(p, data, opts, scopeSet, sentTags) {
+  const existing = (name) => S.tags.find((t) => t.name === name);
+  const proposed = (name) => p.newTags.find((t) => t.key === name);
+  const addNew = (name, description, fromPreset) => {
+    const created = p.newTags.filter((t) => !t.fromPreset).length;
+    if (!fromPreset && (!opts.allowNewTags || created >= opts.maxNewTags)) return null;
+    const t = { key: name, name, description: description || "", checked: true, fromPreset };
+    p.newTags.push(t);
+    return t;
+  };
+  // Preset tags that don't exist yet were sent by the user, so they never count against the new-tag limit.
+  const presetOnly = (name) => sentTags.find((t) => t.name === name && !existing(name));
+
+  for (const nt of data?.newTags || []) {
+    const name = stripNew(nt?.name || "");
+    if (!name || existing(name) || proposed(name)) continue;
+    addNew(name, nt.description || presetOnly(name)?.description, Boolean(presetOnly(name)));
+  }
+  if (data?.note) p.notes.push(String(data.note));
+
+  for (const [bvid, a] of Object.entries(data?.assignments || {})) {
+    if (!scopeSet.has(bvid)) continue;
+    const current = tagIdsOf(bvid);
+    const add = [];
+    for (const raw of a?.add || []) {
+      const name = stripNew(raw);
+      if (!name) continue;
+      const t = existing(name);
+      if (t) {
+        if (!current.includes(t.id)) add.push(`id:${t.id}`);
+        continue;
+      }
+      const nt = proposed(name) || addNew(name, presetOnly(name)?.description, Boolean(presetOnly(name)));
+      if (nt) add.push(`new:${nt.key}`);
+    }
+    const remove = (a?.remove || [])
+      .map((n) => existing(stripNew(n)))
+      .filter((t) => t && current.includes(t.id))
+      .map((t) => t.id);
+    const oldVerdict = verdictOf(S.itemMap.get(bvid)).verdict;
+    const verdict = opts.allowVerdict && ["keep", "drop", "unsure"].includes(a?.verdict) && a.verdict !== oldVerdict ? a.verdict : "";
+    if (!add.length && !remove.length && !verdict) continue;
+    const row = p.rows.find((r) => r.bvid === bvid);
+    if (row) {
+      row.add = [...new Set([...row.add, ...add])];
+      row.remove = [...new Set([...row.remove, ...remove])];
+      row.verdict = verdict || row.verdict;
+      row.reason = a?.reason || row.reason;
+    } else {
+      p.rows.push({ bvid, add, remove, verdict, oldVerdict, reason: a?.reason || "", checked: true });
+    }
+  }
+}
+
+// Row changes after dropping adds of unchecked new tags.
+function effectiveRow(p, row) {
+  const add = row.add.filter((ref) => !ref.startsWith("new:") || p.newTags.find((t) => t.key === ref.slice(4))?.checked);
+  return { add, empty: !add.length && !row.remove.length && !row.verdict };
+}
+
+function refName(p, ref) {
+  return ref.startsWith("id:") ? tagById(ref.slice(3))?.name || "" : p.newTags.find((t) => t.key === ref.slice(4))?.name || "";
+}
+
+function renderAiReview() {
+  const p = S.ai.proposal;
+  el.aiNotes.innerHTML =
+    p.errors.map((e) => `<p class="fail-text">${esc(e)}</p>`).join("") +
+    p.notes.map((n) => `<p class="muted">AI 说明：${esc(n)}</p>`).join("");
+  el.aiNewTags.innerHTML = p.newTags.length
+    ? p.newTags
+        .map(
+          (t, i) => `<div class="ai-newtag" data-i="${i}">
+      <input type="checkbox" data-nt="checked"${t.checked ? " checked" : ""} aria-label="创建标签 ${esc(t.name)}" />
+      <input type="text" data-nt="name" value="${esc(t.name)}" aria-label="新标签名称" />
+      <input type="text" data-nt="description" value="${esc(t.description)}" placeholder="说明：什么时候用这个标签" aria-label="新标签说明" />
+      ${t.fromPreset ? `<span class="muted">来自预设</span>` : ""}
+    </div>`
+        )
+        .join("")
+    : `<p class="muted">没有新标签</p>`;
+  renderAiRows();
+}
+
+function renderAiRows() {
+  const p = S.ai.proposal;
+  const rows = p.rows.map((r) => ({ r, e: effectiveRow(p, r) })).filter((x) => !x.e.empty);
+  const checked = rows.filter((x) => x.r.checked).length;
+  el.aiReviewSummary.textContent = `${rows.length} 个视频有改动 · 新标签 ${p.newTags.filter((t) => t.checked).length} 个 · 点「应用选中」前不会改动任何东西`;
+  el.aiRows.innerHTML = rows.length
+    ? rows
+        .map(({ r, e }) => {
+          const it = S.itemMap.get(r.bvid);
+          const chips =
+            e.add.map((ref) => `<span class="chip add">+ ${esc(refName(p, ref))}</span>`).join("") +
+            r.remove.map((id) => `<span class="chip remove">− ${esc(tagById(id)?.name)}</span>`).join("") +
+            (r.verdict ? `<span class="verdict-change">${VERDICT_LABEL[r.oldVerdict]} → ${VERDICT_LABEL[r.verdict]}</span>` : "");
+          return `<div class="ai-row${r.checked ? "" : " off"}" data-bvid="${esc(r.bvid)}">
+        <input type="checkbox" data-row${r.checked ? " checked" : ""} aria-label="应用到 ${esc(it?.title)}" />
+        <div class="ai-row-body">
+          <div class="ai-row-title">${esc(it?.title || r.bvid)}</div>
+          <div class="chips">${chips}</div>
+          ${r.reason ? `<div class="muted">${esc(r.reason)}</div>` : ""}
+        </div>
+      </div>`;
+        })
+        .join("")
+    : `<p class="empty">AI 没有提出改动</p>`;
+  el.aiApplyBtn.textContent = `应用选中 (${checked})`;
+  el.aiApplyBtn.setAttribute("aria-label", el.aiApplyBtn.textContent);
+  el.aiApplyBtn.disabled = !checked && !p.newTags.some((t) => t.checked);
+}
+
+function applyAiProposal() {
+  const p = S.ai.proposal;
+  if (!p) return;
+  const rows = p.rows.filter((r) => r.checked).map((r) => ({ r, e: effectiveRow(p, r) })).filter((x) => !x.e.empty);
+  const prevTags = structuredClone(S.tags);
+  const prevVideoTags = structuredClone(S.videoTags);
+  const prevOverrides = {};
+  const idFor = {};
+  for (const t of p.newTags) {
+    const name = stripNew(t.name);
+    if (t.checked && name) idFor[t.key] = createTag(name, t.description.trim()).id;
+  }
+  const at = Date.now();
+  for (const { r, e } of rows) {
+    const ids = new Set(tagIdsOf(r.bvid));
+    for (const ref of e.add) {
+      const id = ref.startsWith("id:") ? ref.slice(3) : idFor[ref.slice(4)];
+      if (id) ids.add(id);
+    }
+    for (const id of r.remove) ids.delete(id);
+    if (ids.size) S.videoTags[r.bvid] = [...ids];
+    else delete S.videoTags[r.bvid];
+    if (r.verdict) {
+      prevOverrides[r.bvid] = S.overrides[r.bvid] || null;
+      S.overrides[r.bvid] = { verdict: r.verdict, reason: r.reason, by: "ai-command", at };
+      storeSet(K.override(r.bvid), S.overrides[r.bvid]);
+    }
+  }
+  saveTags();
+  saveVideoTags();
+  pushUndo({ kind: "aiApply", prevTags, prevVideoTags, prevOverrides, count: rows.length });
+  S.ai.proposal = null;
+  el.aiDialog.close();
+  render();
+  toast(`已应用 AI 建议：${rows.length} 个视频 · 撤销(U)`);
+  afterProcessedChange();
 }
 
 // ---------- basket ----------
@@ -1096,7 +1523,7 @@ async function exportBasket() {
 }
 
 // ---------- data export ----------
-const BACKUP_PREFIXES = ["triage_tags", "triage_video_tags", "triage_basket", "triage_snapshot_", "triage_decisions_", "triage_title_", "triage_analysis_"];
+const BACKUP_PREFIXES = ["triage_tags", "triage_video_tags", "triage_basket", "triage_snapshot_", "triage_decisions_", "triage_title_", "triage_analysis_", "triage_tag_presets", OVERRIDE_PREFIX];
 const isSecretKey = (k) => /key|token/i.test(k) || k === "aiProviderKeys" || k === "obsidianApiKey";
 
 async function buildBackup() {
@@ -1117,7 +1544,9 @@ async function buildBackup() {
     basket: [],
     folders: {},
     titleResults: {},
-    analyses: {}
+    analyses: {},
+    tagPresets: [],
+    verdictOverrides: {}
   };
   const folder = (id) =>
     (out.folders[id] ||= { title: S.folders.find((f) => String(f.id) === id)?.title || "", snapshot: null, decisions: {} });
@@ -1125,6 +1554,8 @@ async function buildBackup() {
     if (!BACKUP_PREFIXES.some((p) => k.startsWith(p))) continue;
     if (isSecretKey(k)) continue; // defensive: triage keys never contain these words
     if (k === "triage_tags") out.tags = v;
+    else if (k === K.presets) out.tagPresets = v;
+    else if (k.startsWith(OVERRIDE_PREFIX)) out.verdictOverrides[k.slice(OVERRIDE_PREFIX.length)] = v;
     else if (k === "triage_video_tags") out.videoTags = v;
     else if (k === "triage_basket") out.basket = v;
     else if (k.startsWith("triage_snapshot_")) folder(k.slice(16)).snapshot = v;
@@ -1157,7 +1588,7 @@ function buildCsv() {
       fmtDuration(it.duration),
       videoUrl(it.bvid),
       v.verdict === "none" ? "" : VERDICT_LABEL[v.verdict],
-      v.stage === 2 ? "字幕" : v.stage === 1 ? "标题" : "",
+      ["", "标题", "字幕", "AI 指令"][v.stage] || "",
       v.reason,
       done ? a.oneLiner || "" : "",
       done ? (a.points || []).join(" | ") : "",
@@ -1349,6 +1780,7 @@ function bindEvents() {
     const t = row && tagById(row.dataset.id);
     if (!t) return;
     if (e.target.dataset.field === "color") t.color = e.target.value;
+    if (e.target.dataset.field === "description") t.description = e.target.value.trim();
     if (e.target.dataset.field === "name") {
       const name = e.target.value.trim();
       if (!name || S.tags.some((x) => x !== t && x.name === name)) {
@@ -1380,6 +1812,73 @@ function bindEvents() {
       addTag();
     }
   });
+
+  // presets
+  el.savePresetBtn.addEventListener("click", saveCurrentAsPreset);
+  el.presetRows.addEventListener("click", (e) => {
+    const act = e.target.closest("[data-preset]")?.dataset.preset;
+    const id = e.target.closest(".preset-row")?.dataset.id;
+    if (act === "apply") applyPreset(id);
+    else if (act === "delete") deletePreset(id);
+  });
+  el.presetRows.addEventListener("change", (e) => {
+    if (e.target.dataset.preset !== "instruction") return;
+    const p = S.presets.find((x) => x.id === e.target.closest(".preset-row").dataset.id);
+    if (!p) return;
+    p.instruction = e.target.value.trim();
+    savePresets();
+  });
+
+  // AI command
+  el.aiBtn.addEventListener("click", openAi);
+  for (const input of [el.aiScope, el.aiAllowNew, el.aiMaxNew, el.aiAllowVerdict]) input.addEventListener("change", renderAiForm);
+  el.aiPreset.addEventListener("change", () => {
+    const p = S.presets.find((x) => x.id === el.aiPreset.value);
+    if (p?.instruction) el.aiInstruction.value = p.instruction;
+    renderAiForm();
+  });
+  el.aiHistory.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-h]");
+    if (btn) el.aiInstruction.value = S.aiHistory[Number(btn.dataset.h)];
+  });
+  el.aiRunBtn.addEventListener("click", runAiCommand);
+  el.aiStopBtn.addEventListener("click", () => {
+    S.ai.stop = true;
+    el.aiProgress.textContent = "将在当前批次完成后停止…";
+  });
+  el.aiCloseBtn.addEventListener("click", () => el.aiDialog.close());
+  el.aiNewTags.addEventListener("change", (e) => {
+    const t = S.ai.proposal?.newTags[Number(e.target.closest(".ai-newtag")?.dataset.i)];
+    if (t && e.target.dataset.nt === "checked") {
+      t.checked = e.target.checked;
+      renderAiRows();
+    }
+  });
+  el.aiNewTags.addEventListener("input", (e) => {
+    const t = S.ai.proposal?.newTags[Number(e.target.closest(".ai-newtag")?.dataset.i)];
+    const field = e.target.dataset.nt;
+    if (!t || (field !== "name" && field !== "description")) return;
+    t[field] = e.target.value;
+    if (field === "name") renderAiRows();
+  });
+  el.aiRows.addEventListener("change", (e) => {
+    if (!e.target.matches("[data-row]")) return;
+    const row = S.ai.proposal?.rows.find((r) => r.bvid === e.target.closest(".ai-row").dataset.bvid);
+    if (row) row.checked = e.target.checked;
+    renderAiRows();
+  });
+  const setAllRows = (checked) => {
+    for (const r of S.ai.proposal?.rows || []) r.checked = checked;
+    renderAiRows();
+  };
+  el.aiAllBtn.addEventListener("click", () => setAllRows(true));
+  el.aiNoneBtn.addEventListener("click", () => setAllRows(false));
+  el.aiDiscardBtn.addEventListener("click", () => {
+    S.ai.proposal = null;
+    showAiForm();
+    renderTop();
+  });
+  el.aiApplyBtn.addEventListener("click", applyAiProposal);
 
   // basket
   el.basketToggle.addEventListener("click", () => {
@@ -1480,7 +1979,8 @@ function onKey(e) {
     k: () => moveFocus(-1),
     ArrowUp: () => moveFocus(-1),
     "?": () => el.helpDialog.showModal(),
-    u: () => undo()
+    u: () => undo(),
+    i: () => openAi()
   };
   const cardKeys = { d: "unfav", s: "keep", t: "tag", a: "accept", e: "basket", x: "select", o: "open", Enter: "open" };
   if (map[key]) map[key]();

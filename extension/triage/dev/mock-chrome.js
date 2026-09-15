@@ -77,6 +77,7 @@
   const removed = new Map(); // aid -> { folder, item, index }
   const throttledOnce = new Set();
   let lastMediaId = 1001;
+  let aiCommandCalls = 0;
 
   const findItem = (bvid) => folders.flatMap((f) => f.items).find((it) => it.bvid === bvid) || [...removed.values()].find((r) => r.item.bvid === bvid)?.item;
   const pub = ({ _i, ...rest }) => rest;
@@ -101,7 +102,7 @@
         const i = findItem(bvid)._i;
         const verdict = ["keep", "drop", "unsure", "unsure", "keep"][i % 5];
         const suggestedTags = [];
-        if (tags.length) suggestedTags.push(tags[i % tags.length]);
+        if (tags.length) suggestedTags.push(tags[i % tags.length].name);
         if (i % 6 === 0) suggestedTags.push("新:大模型");
         if (i % 9 === 0) suggestedTags.push("新:工具");
         const r = { verdict, reason: { keep: "标题显示为系统教程", drop: "资讯/娱乐类，时效性强", unsure: "标题信息不足" }[verdict], suggestedTags, confidence: i % 7 === 0 ? "low" : "high" };
@@ -132,12 +133,42 @@
         points: ["讲清了基本概念和适用场景", "给出了一个可运行的完整示例", "最后总结了常见误区"],
         verdict,
         reason: { keep: "有可复用的方法论", drop: "内容浅，信息量低", unsure: "部分有用，需要自己判断" }[verdict],
-        suggestedTags: [tags[0], "新:深度"].filter(Boolean),
+        suggestedTags: [tags[0]?.name, "新:深度"].filter(Boolean),
         model: "mock-model",
         analyzedAt: Date.now()
       };
       store[`triage_analysis_${bvid}`] = a;
       return { ok: true, data: a };
+    },
+    "triage-ai-command": async ({ tags, items, allowNewTags, maxNewTags, allowVerdict }) => {
+      await wait(300);
+      aiCommandCalls++;
+      if (aiCommandCalls === 2) return { ok: false, error: "模型返回的 JSON 无法解析" };
+      const depth = (title) => (/入门|手把手|速通|三分钟|10 分钟|是什么/.test(title) ? "入门" : /原理|数学|手推|推导|解析|可视化/.test(title) ? "硬核" : "");
+      const newTags = [];
+      if (allowNewTags) {
+        for (const [name, description] of [["入门", "零基础能看懂"], ["硬核", "需要数学或源码基础"]].slice(0, maxNewTags)) {
+          if (!tags.some((t) => t.name === name)) newTags.push({ name, description });
+        }
+      }
+      const allowed = new Set([...tags.map((t) => t.name), ...newTags.map((t) => t.name)]);
+      const assignments = {};
+      let verdictChanged = false;
+      items.forEach((it, i) => {
+        const add = [];
+        const d = depth(it.title);
+        if (d && allowed.has(d)) add.push(d);
+        if (tags.length && i % 3 === 0) add.push(tags[i % tags.length].name);
+        const remove = it.currentTags && i % 4 === 0 ? [it.currentTags[0]] : [];
+        const a = { add, remove, reason: d ? `标题显示为${d}内容` : "按指令归类" };
+        if (allowVerdict && !verdictChanged && it.verdict && it.verdict !== "keep") {
+          a.verdict = "keep";
+          a.reason = "指令认为值得保留";
+          verdictChanged = true;
+        }
+        if (add.length || remove.length || a.verdict) assignments[it.bvid] = a;
+      });
+      return { ok: true, data: { newTags, assignments, note: `按指令处理了 ${items.length} 个视频` } };
     },
     "triage-unfav": ({ mediaId, aids }) => {
       const f = folders.find((x) => String(x.id) === String(mediaId));
